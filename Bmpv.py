@@ -69,6 +69,11 @@ class Bmpv:
         # Temporary file as subtitle
         self.subtitle = tempfile.NamedTemporaryFile(suffix='.ass').name
         logging.info(f'Temporary .ass file at: {self.subtitle}')
+        self.width, self.height = subprocess.getoutput(
+            f'ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "{sources[0]}"'
+        ).split('x')
+        logging.info(f'Width: {self.width}')
+        logging.info(f'Height: {self.height}')
         with open(self.subtitle,
                   'w',
                   encoding='utf-8-sig',
@@ -76,8 +81,8 @@ class Bmpv:
                   newline='\r\n') as f:
             ProcessComments(self.comments,
                             f,
-                            width=1920,
-                            height=1080,
+                            width=int(self.width),
+                            height=int(self.height),
                             bottomReserved=0,
                             fontface='sans-serif',
                             fontsize=50,
@@ -87,11 +92,11 @@ class Bmpv:
                             filters_regex=[],
                             reduced=False,
                             progress_callback=None)
-            subprocess.run([
-                'mpv', '--no-ytdl', sources[0], f'--audio-file={sources[-1]}',
-                f'--referrer={self.info["extra"]["referer"]}',
-                f'--sub-file={self.subtitle}', '--sid=1'
-            ])
+        subprocess.run([
+            'mpv', '--no-ytdl', sources[0], f'--audio-file={sources[-1]}',
+            f'--referrer={self.info["extra"]["referer"]}',
+            f'--sub-file={self.subtitle}', '--sid=1'
+        ])
 
 
 def main():

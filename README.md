@@ -6,6 +6,7 @@
 1. [you-get](https://github.com/soimort/you-get/)
 2. [mpv](https://mpv.io/)
 3. python3.7+
+4. [ffmpeg](https://ffmpeg.org/)
 
 ## 使用
 1. `python3 ./Bmpv.py <quality> <url>"`
