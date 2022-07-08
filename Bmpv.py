@@ -16,8 +16,7 @@ if subprocess.run(['which', 'mpv'],
 class Bmpv:
     def __init__(self, quality, url):
         self.quality = quality
-        self.bv = re.findall(r'video/(BV[a-zA-Z0-9]*)\/?\\?\??', url)[0]
-        self.url = f'https://www.bilibili.com/video/{self.bv}'
+        self.url = url
         # Init two threads for async tasks
         t_info = threading.Thread(target=self.getInfo)
         t_info.start()
@@ -27,6 +26,9 @@ class Bmpv:
         # Wait for both to complete
         t_comments.join()
         t_info.join()
+
+        # Process after getting video because height is required
+        self.processComments()
 
     def getInfo(self):
         logging.info('Start getting video info\n')
@@ -43,37 +45,48 @@ class Bmpv:
         except subprocess.CalledProcessError:
             logging.error('CalledProcessError')
 
-    def getComments(self):
-        logging.info('Start getting comments\n')
-        # REF https://www.bilibili.com/read/cv7923601/
-        cid = requests.get(
-            f'https://api.bilibili.com/x/player/pagelist?bvid={self.bv}&jsonp=jsonp'
-        ).json()['data'][0]['cid']
-        # REF https://github.com/soimort/you-get/blob/a47960f6ed7b2a484b6629678b3a6ad8e39497bd/src/you_get/extractors/bilibili.py#L328
-        xml_url = f'https://comment.bilibili.com/{cid}.xml'
-
-        s = re.sub('[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]', '\ufffd',
-                   requests.get(xml_url).content.decode('utf-8'))
-        self.comments = list(ReadCommentsBilibili(io.StringIO(s), fontsize=50))
-        self.comments.sort()
-        logging.info('Done getting comments\n')
-
-    def play(self):
         # Use best quality available if not defined quality
         try:
-            sources = self.info['streams'][self.quality]['src']
+            self.sources = self.info['streams'][self.quality]['src']
         except KeyError:
-            sources = list(self.info['streams'].values())[0]['src']
+            self.sources = list(self.info['streams'].values())[0]['src']
             logging.warning('Default quality unavailable\n')
 
         # Temporary file as subtitle
         self.subtitle = tempfile.NamedTemporaryFile(suffix='.ass').name
         logging.info(f'Temporary .ass file at: {self.subtitle}')
         self.width, self.height = subprocess.getoutput(
-            f'ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "{sources[0]}"'
+            f'ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "{self.sources[0]}"'
         ).split('x')
         logging.info(f'Width: {self.width}')
         logging.info(f'Height: {self.height}')
+
+    def getComments(self):
+        logging.info('Start getting comments\n')
+        initial_state = json.loads(
+            re.findall(r'__INITIAL_STATE__=(.*?);\(function\(\)',
+                       requests.get(self.url).text)[0])
+        if 'videoData' in initial_state:
+            cid = initial_state['videoData']['pages'][0]['cid']
+        elif 'videoInfo' in initial_state:
+            cid = initial_state['videoInfo']['cid']
+        elif 'epInfo' in initial_state:
+            cid = initial_state['epInfo']['cid']
+        # REF https://github.com/soimort/you-get/blob/a47960f6ed7b2a484b6629678b3a6ad8e39497bd/src/you_get/extractors/bilibili.py#L328
+        xml_url = f'https://comment.bilibili.com/{cid}.xml'
+
+        self.comments_str = re.sub(
+            '[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]', '\ufffd',
+            requests.get(xml_url).content.decode('utf-8'))
+
+        logging.info('Done getting comments\n')
+
+    def processComments(self):
+        self.comments = list(
+            ReadCommentsBilibili(io.StringIO(self.comments_str),
+                                 fontsize=int(self.height) // 20))
+        self.comments.sort()
+
         with open(self.subtitle,
                   'w',
                   encoding='utf-8-sig',
@@ -85,18 +98,29 @@ class Bmpv:
                             height=int(self.height),
                             bottomReserved=0,
                             fontface='sans-serif',
-                            fontsize=50,
+                            fontsize=int(self.height) // 20,
                             alpha=1,
                             duration_marquee=10,
                             duration_still=5,
                             filters_regex=[],
                             reduced=False,
                             progress_callback=None)
+
+    def play(self):
         subprocess.run([
-            'mpv', '--no-ytdl', sources[0], f'--audio-file={sources[-1]}',
+            'mpv', '--no-ytdl', self.sources[0],
+            f'--audio-file={self.sources[-1]}',
             f'--referrer={self.info["extra"]["referer"]}',
             f'--sub-file={self.subtitle}', '--sid=1'
         ])
+
+
+def next_ep(url):
+    try:
+        ep_num = int(re.findall(r'ep([0-9]*)', url)[0])
+    except IndexError:
+        return None
+    return re.sub(r'ep([0-9]*)', f'ep{ep_num+1}', url)
 
 
 def main():
@@ -111,8 +135,18 @@ def main():
         help="Quality of the video: ['flv', 'flv720', 'flv480', 'flv360']")
     parser.add_argument('url', metavar='URL', help='Video URL')
     args = parser.parse_args()
-    bmpv = Bmpv(args.quality, args.url)
-    bmpv.play()
+    url = re.findall(r'(.*)\?', args.url.replace('\\', ''))[0]
+    # Start first episode manually
+    bmpv = Bmpv(args.quality, url)
+    while url:
+        # thread of the current episode
+        cur_last = threading.Thread(target=bmpv.play)
+        cur_last.start()
+        # At the same time, prepare for next episode
+        url = next_ep(url)
+        bmpv = Bmpv(args.quality, url)
+        # Wait for user to quit mpv
+        cur_last.join()
 
 
 if __name__ == '__main__':
